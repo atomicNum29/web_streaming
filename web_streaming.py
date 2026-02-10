@@ -1,4 +1,6 @@
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import os
+import struct
 import threading
 import time
 from dataclasses import dataclass
@@ -9,7 +11,8 @@ from urllib.parse import urlparse
 import cv2
 from picamera2 import Picamera2
 
-# YOLO inference removed — streaming-only client
+import serial
+import serial.tools.list_ports
 
 
 @dataclass
@@ -19,17 +22,126 @@ class AppConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
+    serial_out_port: Optional[str] = None
+    serial_baud: int = 115200
+    serial_timeout: float = 1.0
 
 
 def load_config() -> AppConfig:
     """Load runtime configuration (currently hard-coded)."""
+
+    def optional_env(name: str) -> Optional[str]:
+        value = os.getenv(name)
+        return value if value else None
+
     return AppConfig(
         capture_interval=0.03,
         jpeg_quality=80,
         host="0.0.0.0",
         port=8000,
         debug=False,
+        serial_out_port=optional_env("SERIAL_OUT_PORT"),
+        serial_baud=int(os.getenv("SERIAL_BAUD", "115200")),
+        serial_timeout=float(os.getenv("SERIAL_TIMEOUT", "1.0")),
     )
+
+
+def find_teensy_port() -> Optional[str]:
+    """
+    Try to auto-detect a Teensy/USB-UART device.
+    Looks for "Teensy", "usbmodem", "ttyACM" or common USB serial identifiers.
+    """
+    for p in serial.tools.list_ports.comports():
+        desc = (p.description or "").lower()
+        name = (p.device or "").lower()
+        if "teensy" in desc or "teensy" in name:
+            return p.device
+    # fallback heuristics
+    for p in serial.tools.list_ports.comports():
+        name = (p.device or "").lower()
+        if (
+            "usbmodem" in name
+            or "ttyacm" in name
+            or "usbserial" in name
+            or "ttyusb" in name
+        ):
+            return p.device
+    return None
+
+
+SERIAL_SEND_LOCK = threading.Lock()
+
+
+def send_command(
+    v_value: float,
+    w_value: float,
+    port: Optional[str] = None,
+    baud: int = 115200,
+    timeout: float = 1.0,
+) -> str:
+    """
+    Open serial port to Teensy and send a command value (as a line).
+    Returns the first line of response (empty string if none).
+    """
+    with SERIAL_SEND_LOCK:
+        if port is None:
+            port = find_teensy_port()
+            if port is None:
+                raise RuntimeError("Teensy port not found. Provide port explicitly.")
+        with serial.Serial(port, baud, timeout=timeout) as ser:
+            v = float(v_value)
+            w = float(w_value)
+            payload = b"\xaa\x55" + struct.pack("<ff", v, w) + b"\x55\xaa"
+            ser.write(payload)
+            # give device a short moment to respond
+            time.sleep(0.05)
+            try:
+                resp = ser.readline().decode("utf-8", errors="replace").strip()
+            except Exception:
+                resp = ""
+            return resp
+
+
+def _direction_to_vw(direction: Optional[str]) -> Optional[tuple[float, float]]:
+    if not direction:
+        return None
+    direction = direction.lower()
+    if direction == "forward":
+        return 0.2, 0.0
+    if direction == "backward":
+        return -0.2, 0.0
+    if direction == "left":
+        return 0.0, 1.0
+    if direction == "right":
+        return 0.0, -1.0
+    return None
+
+
+def _resolve_command(
+    cmd: Optional[str], dir_: Optional[str]
+) -> Optional[tuple[float, float]]:
+    if not cmd:
+        return None
+    cmd = cmd.lower()
+    if cmd == "stop":
+        return 0.0, 0.0
+    if cmd == "go":
+        return _direction_to_vw(dir_)
+    return None
+
+
+def dispatch_command(v: float, w: float, config: AppConfig, source: str) -> None:
+    try:
+        resp = send_command(
+            v,
+            w,
+            port=config.serial_out_port,
+            baud=config.serial_baud,
+            timeout=config.serial_timeout,
+        )
+        print(f"Sent command from {source}: v={v}, w={w}, resp='{resp}'")
+    except Exception as exc:
+        print(f"Failed to send command from {source}: {exc}")
 
 
 class CameraInferenceService:
@@ -200,6 +312,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     services: Dict[int, "CameraInferenceService"]
     html_template: str
+    config: AppConfig
 
 
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -218,12 +331,25 @@ class SimpleHandler(BaseHTTPRequestHandler):
             cmd = qs.get("cmd", [None])[0]
             dir_ = qs.get("dir", [None])[0]
 
-            if cmd is None or dir_ is None:
+            if cmd is None:
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if cmd != "stop" and dir_ is None:
                 self.send_response(400)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
 
+            resolved = _resolve_command(cmd, dir_)
+            if resolved is None:
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            v, w = resolved
+            dispatch_command(v, w, self.server.config, source=f"http:{cmd}:{dir_}")
             self.send_response(200)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -300,6 +426,7 @@ def main() -> None:
     httpd = ThreadedHTTPServer((config.host, config.port), SimpleHandler)
     httpd.services = services
     httpd.html_template = HTML_TEMPLATE
+    httpd.config = config
     print(f"Serving live stream at http://{config.host}:{config.port}")
     try:
         httpd.serve_forever()
