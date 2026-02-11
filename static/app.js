@@ -60,7 +60,7 @@ function sendCommand(cmd, dir) {
   }
 
   fetch(`/control?${params.toString()}`, { method: "GET", keepalive: true }).catch(
-    () => {}
+    () => { }
   );
 }
 

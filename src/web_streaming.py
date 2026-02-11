@@ -28,7 +28,7 @@ import serial
 import serial.tools.list_ports
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 @dataclass

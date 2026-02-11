@@ -1,11 +1,13 @@
 <!doctype html>
 <html lang="en">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Stream Station</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
+
 <body>
   <div class="shell">
     <header class="top">
@@ -34,13 +36,13 @@
           <h2>Drive</h2>
           <p>Use arrow keys or WASD. Press and hold.</p>
           <div class="dpad">
-            <button class="btn" data-dir="forward">UP</button>
+            <button class="btn" data-dir="forward">FORWARD</button>
             <div class="dpad-row">
               <button class="btn" data-dir="left">LEFT</button>
               <button class="btn stop" data-dir="stop">STOP</button>
               <button class="btn" data-dir="right">RIGHT</button>
             </div>
-            <button class="btn" data-dir="backward">DOWN</button>
+            <button class="btn" data-dir="backward">BACKWARD</button>
           </div>
         </div>
 
@@ -48,10 +50,10 @@
           <h2>Quick</h2>
           <p>Tap to jog the platform.</p>
           <div class="quick-grid">
-            <button class="btn ghost" data-dir="forward" data-burst="true">PULSE UP</button>
+            <button class="btn ghost" data-dir="forward" data-burst="true">PULSE FORWARD</button>
             <button class="btn ghost" data-dir="left" data-burst="true">PULSE LEFT</button>
             <button class="btn ghost" data-dir="right" data-burst="true">PULSE RIGHT</button>
-            <button class="btn ghost" data-dir="backward" data-burst="true">PULSE DOWN</button>
+            <button class="btn ghost" data-dir="backward" data-burst="true">PULSE BACKWARD</button>
           </div>
         </div>
       </section>
@@ -60,4 +62,5 @@
 
   <script src="/static/app.js" defer></script>
 </body>
+
 </html>
