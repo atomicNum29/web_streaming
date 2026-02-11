@@ -24,7 +24,7 @@ class AppConfig:
     debug: bool = False
     serial_out_port: Optional[str] = None
     serial_baud: int = 115200
-    serial_timeout: float = 1.0
+    serial_timeout: float = 0.0
 
 
 def load_config() -> AppConfig:
@@ -42,7 +42,7 @@ def load_config() -> AppConfig:
         debug=False,
         serial_out_port=optional_env("SERIAL_OUT_PORT"),
         serial_baud=int(os.getenv("SERIAL_BAUD", "115200")),
-        serial_timeout=float(os.getenv("SERIAL_TIMEOUT", "1.0")),
+        serial_timeout=float(os.getenv("SERIAL_TIMEOUT", "0.0")),
     )
 
 
@@ -77,7 +77,7 @@ def send_command(
     w_value: float,
     port: Optional[str] = None,
     baud: int = 115200,
-    timeout: float = 1.0,
+    timeout: float = 0.0,
 ) -> str:
     """
     Open serial port to Teensy and send a command value (as a line).
@@ -111,9 +111,9 @@ def _direction_to_vw(direction: Optional[str]) -> Optional[tuple[float, float]]:
     if direction == "backward":
         return -0.2, 0.0
     if direction == "left":
-        return 0.0, 1.0
+        return 0.0, 5.0
     if direction == "right":
-        return 0.0, -1.0
+        return 0.0, -5.0
     return None
 
 
