@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stream Station</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="top">
+      <div class="brand">
+        <div class="brand-name">Stream Station</div>
+        <div class="brand-sub">Live cameras with low-latency control.</div>
+      </div>
+      <div class="status" aria-live="polite">
+        <span id="ws-dot" class="dot" data-state="wait"></span>
+        <span id="ws-status">Connecting</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="streams">
+        {% for cam_id in camera_ids %}
+        <article class="panel">
+          <div class="panel-header">Camera {{ cam_id }}</div>
+          <img src="/stream/{{ cam_id }}" alt="Camera {{ cam_id }} stream">
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="controls">
+        <div class="control-card">
+          <h2>Drive</h2>
+          <p>Use arrow keys or WASD. Press and hold.</p>
+          <div class="dpad">
+            <button class="btn" data-dir="forward">UP</button>
+            <div class="dpad-row">
+              <button class="btn" data-dir="left">LEFT</button>
+              <button class="btn stop" data-dir="stop">STOP</button>
+              <button class="btn" data-dir="right">RIGHT</button>
+            </div>
+            <button class="btn" data-dir="backward">DOWN</button>
+          </div>
+        </div>
+
+        <div class="control-card">
+          <h2>Quick</h2>
+          <p>Tap to jog the platform.</p>
+          <div class="quick-grid">
+            <button class="btn ghost" data-dir="forward" data-burst="true">PULSE UP</button>
+            <button class="btn ghost" data-dir="left" data-burst="true">PULSE LEFT</button>
+            <button class="btn ghost" data-dir="right" data-burst="true">PULSE RIGHT</button>
+            <button class="btn ghost" data-dir="backward" data-burst="true">PULSE DOWN</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

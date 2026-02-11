@@ -1,23 +1,39 @@
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from __future__ import annotations
+
+import asyncio
 import os
 import struct
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from socketserver import ThreadingMixIn
+from pathlib import Path
 from typing import Dict, Iterator, Optional
-from urllib.parse import urlparse
 
 import cv2
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from picamera2 import Picamera2
 
 import serial
 import serial.tools.list_ports
 
 
+BASE_DIR = Path(__file__).resolve().parent
+
+
 @dataclass
 class AppConfig:
-    capture_interval: float = 0.5
+    capture_interval: float = 0.03
     jpeg_quality: int = 80
     host: str = "0.0.0.0"
     port: int = 8000
@@ -25,24 +41,40 @@ class AppConfig:
     serial_out_port: Optional[str] = None
     serial_baud: int = 115200
     serial_timeout: float = 0.0
+    camera_ids: tuple[int, ...] = (0, 1)
 
 
 def load_config() -> AppConfig:
-    """Load runtime configuration (currently hard-coded)."""
+    """Load runtime configuration from environment variables."""
 
     def optional_env(name: str) -> Optional[str]:
         value = os.getenv(name)
         return value if value else None
 
+    def parse_camera_ids(value: str) -> tuple[int, ...]:
+        ids: list[int] = []
+        for chunk in value.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                ids.append(int(chunk))
+            except ValueError:
+                continue
+        return tuple(ids) if ids else (0,)
+
+    camera_ids = parse_camera_ids(os.getenv("CAMERA_IDS", "0,1"))
+
     return AppConfig(
-        capture_interval=0.03,
-        jpeg_quality=80,
-        host="0.0.0.0",
-        port=8000,
-        debug=False,
+        capture_interval=float(os.getenv("CAPTURE_INTERVAL", "0.03")),
+        jpeg_quality=int(os.getenv("JPEG_QUALITY", "80")),
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        debug=os.getenv("DEBUG", "false").lower() == "true",
         serial_out_port=optional_env("SERIAL_OUT_PORT"),
         serial_baud=int(os.getenv("SERIAL_BAUD", "115200")),
         serial_timeout=float(os.getenv("SERIAL_TIMEOUT", "0.0")),
+        camera_ids=camera_ids,
     )
 
 
@@ -56,7 +88,6 @@ def find_teensy_port() -> Optional[str]:
         name = (p.device or "").lower()
         if "teensy" in desc or "teensy" in name:
             return p.device
-    # fallback heuristics
     for p in serial.tools.list_ports.comports():
         name = (p.device or "").lower()
         if (
@@ -93,7 +124,6 @@ def send_command(
             w = float(w_value)
             payload = b"\xaa\x55" + struct.pack("<ff", v, w) + b"\x55\xaa"
             ser.write(payload)
-            # give device a short moment to respond
             time.sleep(0.05)
             try:
                 resp = ser.readline().decode("utf-8", errors="replace").strip()
@@ -111,9 +141,9 @@ def _direction_to_vw(direction: Optional[str]) -> Optional[tuple[float, float]]:
     if direction == "backward":
         return -0.2, 0.0
     if direction == "left":
-        return 0.0, 5.0
+        return 0.0, 4.0
     if direction == "right":
-        return 0.0, -5.0
+        return 0.0, -4.0
     return None
 
 
@@ -130,7 +160,7 @@ def _resolve_command(
     return None
 
 
-def dispatch_command(v: float, w: float, config: AppConfig, source: str) -> None:
+def _dispatch_command_sync(v: float, w: float, config: AppConfig, source: str) -> None:
     try:
         resp = send_command(
             v,
@@ -142,6 +172,12 @@ def dispatch_command(v: float, w: float, config: AppConfig, source: str) -> None
         print(f"Sent command from {source}: v={v}, w={w}, resp='{resp}'")
     except Exception as exc:
         print(f"Failed to send command from {source}: {exc}")
+
+
+async def dispatch_command_async(
+    v: float, w: float, config: AppConfig, source: str
+) -> None:
+    await asyncio.to_thread(_dispatch_command_sync, v, w, config, source)
 
 
 class CameraInferenceService:
@@ -191,15 +227,13 @@ class CameraInferenceService:
                 if self._stop.is_set():
                     break
                 frame = self._latest_original
-
                 seq = self._frame_seq
             if frame is None:
                 continue
             last_seq = seq
-            yield (boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            yield boundary + b"\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
 
     def _loop(self) -> None:
-        """Capture frames, store original/detection images, and publish latest paths."""
         jpeg_quality = int(max(10, min(95, self.config.jpeg_quality)))
         encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
         while not self._stop.is_set():
@@ -228,218 +262,112 @@ class CameraInferenceService:
                 time.sleep(self.config.capture_interval)
 
 
-HTML_TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-    <title>Live Camera Stream</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background: #f3f3f3; }
-    .wrapper { background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }
-    .images { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 12px; }
-    img { width: 100%; border: 1px solid #ddd; border-radius: 6px; background: #fafafa; min-height: 160px; }
-    h1 { margin-bottom: 4px; }
-    p { margin: 0; }
-  </style>
-</head>
-<body>
-  <div class="wrapper">
-    <h1>Camera Monitor</h1>
-    <div class="images">
-      <div>
-        <img id="img-original0" src="/stream0" alt="Original stream">
-      </div>
-      <div>
-        <img id="img-original1" src="/stream1" alt="Original stream">
-      </div>
-    </div>
-  </div>
-<script>
-    const keys = {};
-    
-    window.addEventListener('keydown', (e) => {
-        const k = e.key.toLowerCase();
-        if (keys[k]) return;          // 이미 눌린 키면 무시
-        keys[k] = true;
-        // console.log(`key down: ${k}`);
-        buttonPress(getCommand(k));
-    });
-    
-    window.addEventListener('keyup', (e) => {
-        const k = e.key.toLowerCase();
-        keys[k] = false;
-        // console.log(`key up: ${k}`);
-        buttonRelease(getCommand(k));
-    });
-    
-    function getCommand(key) {
-        if (key === 'arrowup') return 'forward';
-        if (key === 'arrowdown') return 'backward';
-        if (key === 'arrowleft') return 'left';
-        if (key === 'arrowright') return 'right';
-        return null;
-    }
-    
-    function buttonPress(direction) {
-        fetch(`/control?cmd=go&dir=${direction}`);
-        console.log(`key down: ${direction}`);
-    }
-    
-    function buttonRelease(direction) {
-        fetch(`/control?cmd=stop&dir=${direction}`);
-        console.log(`key up: ${direction}`);
-    }
-</script>
-<div style="margin-top: 20px; text-align: center;">
-    <div style="margin-bottom: 10px;">
-        <button onmousedown="buttonPress('forward')" onmouseup="buttonRelease('forward')" style="padding: 10px 20px; font-size: 20px;">↑</button>
-    </div>
-    <div style="margin-bottom: 10px;">
-        <button onmousedown="buttonPress('left')" onmouseup="buttonRelease('left')" style="padding: 10px 20px; margin-right: 10px; font-size: 20px;">←</button>
-        <button onmousedown="buttonPress('backward')" onmouseup="buttonRelease('backward')" style="padding: 10px 20px; margin-right: 10px; font-size: 20px;">↓</button>
-        <button onmousedown="buttonPress('right')" onmouseup="buttonRelease('right')" style="padding: 10px 20px; font-size: 20px;">→</button>
-    </div>
-</div>
-</body>
-</html>
-"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    config = load_config()
+    services: Dict[int, CameraInferenceService] = {}
+    for camera_id in config.camera_ids:
+        try:
+            service = CameraInferenceService(config, camera_num=camera_id)
+            service.start()
+            services[camera_id] = service
+        except Exception as exc:
+            print(f"Failed to start camera {camera_id}: {exc}")
+    app.state.config = config
+    app.state.services = services
+    yield
+    for service in services.values():
+        service.stop()
 
 
-# 1. 멀티 스레딩이 가능한 서버 클래스 정의
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """Handle requests in a separate thread."""
+app = FastAPI(lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-    daemon_threads = True
-    services: Dict[int, "CameraInferenceService"]
-    html_template: str
-    config: AppConfig
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-class SimpleHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-    server: "ThreadedHTTPServer"
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    services: Dict[int, CameraInferenceService] = request.app.state.services
+    camera_ids = sorted(services.keys())
+    return templates.TemplateResponse(
+        "index.html", {"request": request, "camera_ids": camera_ids}
+    )
 
-    def do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        path = parsed.path
-        if path == "/":
-            self._send_html()
-            return
 
-        if path == "/control":
-            qs = self._parse_qs(parsed.query)
-            cmd = qs.get("cmd", [None])[0]
-            dir_ = qs.get("dir", [None])[0]
+@app.get("/stream/{camera_id}")
+async def stream_camera(camera_id: int, request: Request):
+    services: Dict[int, CameraInferenceService] = request.app.state.services
+    service = services.get(camera_id)
+    if service is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return StreamingResponse(
+        service.frame_generator(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
 
-            if cmd is None:
-                self.send_response(400)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            if cmd != "stop" and dir_ is None:
-                self.send_response(400)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
+
+@app.get("/control")
+async def control(
+    request: Request,
+    cmd: str = Query(...),
+    dir_: Optional[str] = Query(None, alias="dir"),
+):
+    resolved = _resolve_command(cmd, dir_)
+    if resolved is None:
+        raise HTTPException(status_code=400, detail="Invalid command")
+    v, w = resolved
+    config: AppConfig = request.app.state.config
+    await dispatch_command_async(v, w, config, source=f"http:{cmd}:{dir_}")
+    return JSONResponse({"ok": True})
+
+
+@app.websocket("/ws/control")
+async def control_ws(websocket: WebSocket):
+    await websocket.accept()
+    config: AppConfig = websocket.app.state.config
+    try:
+        while True:
+            try:
+                payload = await websocket.receive_json()
+            except ValueError:
+                await websocket.send_json(
+                    {"ok": False, "error": "Invalid JSON payload"}
+                )
+                continue
+            cmd = payload.get("cmd")
+            dir_ = payload.get("dir")
+            v = payload.get("v")
+            w = payload.get("w")
+            if v is not None and w is not None:
+                await dispatch_command_async(float(v), float(w), config, "ws:vw")
+                await websocket.send_json({"ok": True})
+                continue
 
             resolved = _resolve_command(cmd, dir_)
             if resolved is None:
-                self.send_response(400)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            v, w = resolved
-            dispatch_command(v, w, self.server.config, source=f"http:{cmd}:{dir_}")
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-
-        stream_index = self._parse_stream_index(path)
-        if stream_index is not None:
-            service = self._get_service(stream_index)
-            if service is None:
-                self.send_response(404)
-                self.end_headers()
-                return
-            self._stream_mjpeg(service)
-            return
-
-        self.send_response(404)
-        self.end_headers()
-
-    def _send_html(self) -> None:
-        body = self.server.html_template.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _parse_stream_index(self, path: str) -> Optional[int]:
-        if not path.startswith("/stream"):
-            return None
-        suffix = path[len("/stream") :]
-        if not suffix.isdigit():
-            return None
-        return int(suffix)
-
-    def _parse_qs(self, path: str) -> Dict[str, list[str]]:
-        qs: Dict[str, list[str]] = {}
-        for pair in path.split("&"):
-            if "=" not in pair:
+                await websocket.send_json({"ok": False, "error": "Invalid command"})
                 continue
-            key, value = pair.split("=", 1)
-            if key not in qs:
-                qs[key] = []
-            qs[key].append(value)
-        return qs
-
-    def _get_service(self, index: int) -> Optional["CameraInferenceService"]:
-        return self.server.services.get(index)
-
-    def _stream_mjpeg(self, service: "CameraInferenceService") -> None:
-        try:
-            self.send_response(200)
-            self.send_header(
-                "Content-Type", "multipart/x-mixed-replace; boundary=frame"
-            )
-            self.end_headers()
-            for chunk in service.frame_generator():
-                try:
-                    self.wfile.write(chunk)
-                except BrokenPipeError:
-                    break
-        except Exception:
-            pass
+            rv, rw = resolved
+            await dispatch_command_async(rv, rw, config, f"ws:{cmd}:{dir_}")
+            await websocket.send_json({"ok": True})
+    except WebSocketDisconnect:
+        return
 
 
-def main() -> None:
-    config = load_config()
-    services = {
-        0: CameraInferenceService(config, camera_num=0),
-        1: CameraInferenceService(config, camera_num=1),
-    }
-    for service in services.values():
-        service.start()
-
-    httpd = ThreadedHTTPServer((config.host, config.port), SimpleHandler)
-    httpd.services = services
-    httpd.html_template = HTML_TEMPLATE
-    httpd.config = config
-    print(f"Serving live stream at http://{config.host}:{config.port}")
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        try:
-            httpd.shutdown()
-        except Exception:
-            pass
-        for service in services.values():
-            service.stop()
+@app.get("/health")
+async def health(request: Request):
+    services: Dict[int, CameraInferenceService] = request.app.state.services
+    return {"cameras": sorted(services.keys())}
 
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+
+    config = load_config()
+    uvicorn.run(
+        "web_streaming:app",
+        host=config.host,
+        port=config.port,
+        reload=config.debug,
+    )
