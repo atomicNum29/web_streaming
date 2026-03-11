@@ -4,9 +4,8 @@ import argparse
 from typing import Optional
 import serial
 import struct
-
-# /Users/baksiu/Documents/PlatformIO/Projects/car_demo/src/control.py
-# GitHub Copilot
+from time import sleep
+from pathlib import Path
 
 import serial.tools.list_ports
 
@@ -16,22 +15,34 @@ def find_teensy_port() -> Optional[str]:
     Try to auto-detect a Teensy/USB-UART device.
     Looks for "Teensy", "usbmodem", "ttyACM" or common USB serial identifiers.
     """
-    for p in serial.tools.list_ports.comports():
-        desc = (p.description or "").lower()
-        name = (p.device or "").lower()
-        if "teensy" in desc or "teensy" in name:
-            return p.device
-    # fallback heuristics
-    for p in serial.tools.list_ports.comports():
-        name = (p.device or "").lower()
-        if (
-            "usbmodem" in name
-            or "ttyacm" in name
-            or "usbserial" in name
-            or "ttyusb" in name
-        ):
-            return p.device
+    by_id = Path("/dev/serial/by-id")
+    if not by_id.exists():
+        return None
+
+    for p in by_id.iterdir():
+        name = p.name.lower()
+        if "teensy" in name:
+            return str(p.resolve())
+
     return None
+    # for p in serial.tools.list_ports.comports():
+    #     desc = (p.description or "").lower()
+    #     name = (p.device or "").lower()
+    #     print(f"Checking port: {p.device}, desc: {desc}")
+    #     print(f"Checking port: {p.device}, name: {name}")
+    #     if "teensy" in desc or "teensy" in name:
+    #         return p.device
+    # # fallback heuristics
+    # for p in serial.tools.list_ports.comports():
+    #     name = (p.device or "").lower()
+    #     if (
+    #         "usbmodem" in name
+    #         or "ttyacm" in name
+    #         or "usbserial" in name
+    #         # or "ttyusb" in name
+    #     ):
+    #         return p.device
+    # return None
 
 
 def send_command(
@@ -80,6 +91,7 @@ def main(argv):
             f"Sending v={args.v_value}, w={args.w_value} to port={args.port or 'auto-detected'} at {args.baud} baud..."
         )
         resp = send_command(args.v_value, args.w_value, port=args.port, baud=args.baud)
+        sleep(0.1)  # wait a moment for any response to arrive
         if resp:
             print(resp)
     except Exception as e:

@@ -83,20 +83,15 @@ def find_teensy_port() -> Optional[str]:
     Try to auto-detect a Teensy/USB-UART device.
     Looks for "Teensy", "usbmodem", "ttyACM" or common USB serial identifiers.
     """
-    for p in serial.tools.list_ports.comports():
-        desc = (p.description or "").lower()
-        name = (p.device or "").lower()
-        if "teensy" in desc or "teensy" in name:
-            return p.device
-    for p in serial.tools.list_ports.comports():
-        name = (p.device or "").lower()
-        if (
-            "usbmodem" in name
-            or "ttyacm" in name
-            or "usbserial" in name
-            or "ttyusb" in name
-        ):
-            return p.device
+    by_id = Path("/dev/serial/by-id")
+    if not by_id.exists():
+        return None
+
+    for p in by_id.iterdir():
+        name = p.name.lower()
+        if "teensy" in name:
+            return str(p.resolve())
+
     return None
 
 
