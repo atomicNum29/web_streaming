@@ -1,3 +1,5 @@
 #!/bin/bash
 
-uvicorn src.web_streaming:app --host 0.0.0.0 --port 8000
+path=$(dirname "$0")
+echo "$path" 
+$path/.venv/bin/uvicorn src.web_streaming:app --host 0.0.0.0 --port 8000
